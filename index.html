@@ -1,0 +1,537 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VaporMap — Lab Docker (production)</title>
+  <link rel="stylesheet" href="docs/visualisation/css/style.css" />
+  <script defer src="docs/visualisation/js/alpine.min.js"></script>
+  <script defer src="docs/visualisation/js/app.js"></script>
+</head>
+<body>
+  <div class="layout" x-data="readme">
+
+    <aside class="sidebar">
+      <h2>Sommaire</h2>
+      <nav>
+        <a href="#presentation" :class="{ active: isActive('presentation') }">Présentation</a>
+        <a href="#partie1" :class="{ active: isActive('partie1') }">1 · Contraintes "production"</a>
+        <a href="#partie2" :class="{ active: isActive('partie2') }">2 · Architecture</a>
+        <a href="#partie3" :class="{ active: isActive('partie3') }">3 · Services</a>
+        <a href="#partie4" :class="{ active: isActive('partie4') }">4 · Images</a>
+        <a href="#partie5" :class="{ active: isActive('partie5') }">5 · Stack</a>
+        <a href="#partie6" :class="{ active: isActive('partie6') }">6 · Validation</a>
+        <a href="#complements" :class="{ active: isActive('complements') }">Compléments</a>
+      </nav>
+    </aside>
+
+    <main class="content">
+
+      <header class="page-header" id="presentation">
+        <h1>Lab Docker — Application VaporMap en mode production</h1>
+        <p>Binôme : GUILLIER Yaële, RASDA Corentin</p>
+        <div class="disclaimer">
+          <strong>Ébauche.</strong> Les blocs marqués <code>À COMPLÉTER</code> dans le
+          compte-rendu original attendent les sorties réelles des commandes : ils ne
+          doivent pas être remplis de mémoire. Cette page est une lecture organisée du
+          <code>README.md</code>, pas une nouvelle source de vérité.
+        </div>
+      </header>
+
+      <section class="part">
+        <h3>Organisation du dépôt</h3>
+        <pre><code>.
+├── README.md               compte-rendu
+├── docker-compose.yml      stack de l'application
+├── .env.example             modèle des paramètres de déploiement (le .env réel n'est pas versionné)
+├── api/
+│   ├── Dockerfile
+│   └── entrypoint.sh        migration de la base, puis lancement de Gunicorn
+└── frontend/
+    ├── Dockerfile
+    ├── nginx.conf            configuration du serveur WEB
+    └── 40-vapormap-config.sh génération de config.json au démarrage</code></pre>
+        <p class="part-intro">
+          Le code de l'application n'est pas dans ce dépôt : il est récupéré au moment du
+          build, à un commit précis (voir Partie 4).
+        </p>
+      </section>
+
+      <!-- ================= PARTIE 1 ================= -->
+      <section class="part" id="partie1">
+        <h2>Partie 1 — Définition des contraintes du mode "production"</h2>
+        <p class="part-intro">
+          Point de départ : le déploiement Docker en mode "développement" — frontend
+          servi par <code>http.server</code>, API sur le serveur intégré de Flask,
+          données SQLite dans le conteneur de l'API, images en <code>root</code>, code
+          cloné sur la branche courante. Pour chaque point : le <strong>besoin</strong>,
+          puis la <strong>solution</strong>. La colonne "Conteneurs" indique ce que
+          Docker change par rapport au lab Linux précédent :
+          <span class="badge badge--resolu">Résolu</span> par la technologie,
+          <span class="badge badge--a-traiter">À traiter</span> malgré elle, ou
+          <span class="badge badge--nouveau">Nouveau</span>.
+        </p>
+
+        <button class="accordion-toggle" :class="{ open: isOpen('p1-fonc') }" @click="togglePanel('p1-fonc')">
+          Fonctionnement et architecture <span class="chevron">▸</span>
+        </button>
+        <div class="accordion-body" x-show="isOpen('p1-fonc')">
+          <div class="table-scroll"><table>
+            <thead><tr><th>Point d'attention</th><th>Solution</th><th>Conteneurs</th><th>Mis en œuvre</th></tr></thead>
+            <tbody>
+              <tr><td>Les points saisis doivent survivre à l'arrêt, à la suppression ou à la mise à jour du conteneur de l'API. En dev, SQLite est dans le système de fichiers du conteneur.</td><td>Base de données dans un service séparé, stockage dans un volume nommé</td><td><span class="badge badge--nouveau">Nouveau</span> : le système de fichiers d'un conteneur est jetable</td><td><span class="badge badge--oui">Oui</span></td></tr>
+              <tr><td>Deux builds de la même image doivent produire le même environnement. En dev, <code>git clone</code> prend la branche du moment et <code>python:3.12-slim</code> est un tag mobile.</td><td>Images de base à tag précis, code figé à un commit</td><td><span class="badge badge--nouveau">Nouveau</span> : le build est rejoué, il doit être reproductible</td><td><span class="badge badge--oui">Oui</span></td></tr>
+              <tr><td>Le schéma de la base doit exister avant la première requête, sans intervention manuelle, sans casser les données existantes à chaque redémarrage.</td><td><code>flask db upgrade</code> au démarrage de l'API (idempotent)</td><td><span class="badge badge--nouveau">Nouveau</span> : l'initialisation se fait au lancement</td><td><span class="badge badge--oui">Oui</span></td></tr>
+              <tr><td>L'API ne doit pas tenter sa migration avant que la base accepte des connexions.</td><td><code>depends_on</code> conditionné à un healthcheck de la base</td><td><span class="badge badge--nouveau">Nouveau</span> : les services démarrent en parallèle</td><td><span class="badge badge--oui">Oui</span></td></tr>
+              <tr><td>Les services doivent redémarrer après un incident ou un reboot de l'hôte. Sur Linux, c'était <code>systemctl enable</code>.</td><td>Politique <code>restart</code></td><td><span class="badge badge--a-traiter">À traiter</span> : systemD ne gère plus les processus</td><td><span class="badge badge--non">Non</span> (complément 6)</td></tr>
+              <tr><td>L'adresse de l'API écrite dans <code>config.json</code> est utilisée <strong>par le navigateur</strong>, et doit donc être joignable depuis le poste de l'utilisateur.</td><td>Adresse publique passée en variable au démarrage du frontend</td><td><span class="badge badge--a-traiter">À traiter</span> : le nom de service <code>api</code> n'existe que dans la stack</td><td><span class="badge badge--oui">Oui</span></td></tr>
+            </tbody>
+          </table></div>
+        </div>
+
+        <button class="accordion-toggle" :class="{ open: isOpen('p1-perf') }" @click="togglePanel('p1-perf')">
+          Performance <span class="chevron">▸</span>
+        </button>
+        <div class="accordion-body" x-show="isOpen('p1-perf')">
+          <div class="table-scroll"><table>
+            <thead><tr><th>Point d'attention</th><th>Solution</th><th>Conteneurs</th><th>Mis en œuvre</th></tr></thead>
+            <tbody>
+              <tr><td>Le serveur intégré de Flask traite les requêtes une par une, non prévu pour la production.</td><td>Gunicorn, plusieurs workers</td><td><span class="badge badge--a-traiter">À traiter</span> : même problème qu'hors conteneur</td><td><span class="badge badge--oui">Oui</span></td></tr>
+              <tr><td><code>http.server</code> (Python) sert mal les fichiers statiques : pas de cache, un seul processus.</td><td>Nginx</td><td><span class="badge badge--a-traiter">À traiter</span></td><td><span class="badge badge--oui">Oui</span></td></tr>
+              <tr><td>Des images volumineuses ralentissent le déploiement et embarquent des outils inutiles à l'exécution (compilateur, git…).</td><td>Une seule couche pour installer et purger les dépendances de build (multi-stage plus tard)</td><td><span class="badge badge--nouveau">Nouveau</span></td><td><span class="badge badge--partiel">Partiel</span> (complément 2)</td></tr>
+            </tbody>
+          </table></div>
+        </div>
+
+        <button class="accordion-toggle" :class="{ open: isOpen('p1-sec') }" @click="togglePanel('p1-sec')">
+          Sécurité <span class="chevron">▸</span>
+        </button>
+        <div class="accordion-body" x-show="isOpen('p1-sec')">
+          <div class="table-scroll"><table>
+            <thead><tr><th>Point d'attention</th><th>Solution</th><th>Conteneurs</th><th>Mis en œuvre</th></tr></thead>
+            <tbody>
+              <tr><td>Une faille dans l'API ou Nginx ne doit pas donner les droits <code>root</code> sur le conteneur, qui partage le noyau de l'hôte.</td><td>Exécution sous un utilisateur non privilégié</td><td><span class="badge badge--a-traiter">À traiter</span> : les images de dev tournaient en <code>root</code></td><td><span class="badge badge--oui">Oui</span></td></tr>
+              <tr><td>Le processus applicatif ne doit pas pouvoir modifier son propre code.</td><td>Code possédé par <code>root</code>, lu par l'utilisateur d'exécution</td><td><span class="badge badge--a-traiter">À traiter</span></td><td><span class="badge badge--oui">Oui</span></td></tr>
+              <tr><td>La base de données ne doit pas être joignable depuis l'extérieur de la machine.</td><td>Aucun port publié pour le service <code>db</code></td><td><span class="badge badge--resolu">Résolu en partie</span> : réseau de la stack isolé par défaut</td><td><span class="badge badge--oui">Oui</span></td></tr>
+              <tr><td>Les identifiants de la base ne doivent pas se retrouver dans l'image, publiable dans un registre.</td><td>Variables d'environnement fournies au lancement</td><td><span class="badge badge--nouveau">Nouveau</span> : une image est un artefact distribuable</td><td><span class="badge badge--oui">Oui</span> (hors image, dans <code>.env</code>)</td></tr>
+              <tr><td>Les mots de passe ne doivent pas être en clair dans le dépôt git.</td><td>Fichier <code>.env</code> exclu du dépôt, <code>.env.example</code> versionné</td><td><span class="badge badge--nouveau">Nouveau</span></td><td><span class="badge badge--partiel">Partiel</span> (complément 5)</td></tr>
+              <tr><td>Le compte <code>root</code> de MariaDB ne doit pas avoir un mot de passe connu.</td><td><code>MARIADB_RANDOM_ROOT_PASSWORD</code></td><td><span class="badge badge--nouveau">Nouveau</span></td><td><span class="badge badge--oui">Oui</span></td></tr>
+              <tr><td>Les échanges entre le navigateur et l'application passent en clair.</td><td>HTTPS en frontal</td><td><span class="badge badge--a-traiter">À traiter</span></td><td><span class="badge badge--non">Non</span> : hors périmètre du lab</td></tr>
+            </tbody>
+          </table></div>
+        </div>
+      </section>
+
+      <!-- ================= PARTIE 2 ================= -->
+      <section class="part" id="partie2">
+        <h2>Partie 2 — Définition de l'architecture</h2>
+
+        <h3>Acteurs</h3>
+        <div class="card-grid">
+          <div class="card"><strong>Utilisateur</strong>Consulte la carte et saisit des relevés depuis son navigateur.</div>
+          <div class="card"><strong>Exploitant</strong>Déploie, configure (adresse publique, identifiants), sauvegarde et surveille l'application.</div>
+          <div class="card"><strong>Mainteneurs du code</strong>Publient les dépôts du frontend et de l'API, d'où le code est récupéré.</div>
+          <div class="card"><strong>Fournisseur de tuiles cartographiques</strong>(OpenStreetMap) — système externe, sollicité directement par le navigateur.</div>
+        </div>
+
+        <h3>Composants</h3>
+        <div class="table-scroll"><table>
+          <thead><tr><th>Composant</th><th>Rôle</th></tr></thead>
+          <tbody>
+            <tr><td>Application cliente</td><td>Code JavaScript (carte, formulaire) exécuté <strong>dans le navigateur</strong>, pas sur le serveur</td></tr>
+            <tr><td>Serveur de fichiers statiques</td><td>Publie la page HTML, les scripts, les feuilles de style et <code>config.json</code></td></tr>
+            <tr><td>Configuration du client</td><td><code>config.json</code> : adresse de l'API vue par le navigateur, propre à chaque déploiement</td></tr>
+            <tr><td>Serveur d'application</td><td>Exécute l'API, gère plusieurs requêtes en parallèle</td></tr>
+            <tr><td>API</td><td>Logique métier : validation, lecture et écriture des points, production du GeoJSON</td></tr>
+            <tr><td>Base de données</td><td>Stockage structuré des points</td></tr>
+            <tr><td>Stockage persistant</td><td>Fichiers de la base, indépendants du cycle de vie des composants</td></tr>
+          </tbody>
+        </table></div>
+
+        <h3>Points d'accès de l'API</h3>
+        <div class="table-scroll"><table>
+          <thead><tr><th>Méthode</th><th>URI</th><th>Rôle</th></tr></thead>
+          <tbody>
+            <tr><td><code>GET</code></td><td><code>/api/points/</code></td><td>Liste des points</td></tr>
+            <tr><td><code>POST</code></td><td><code>/api/points/</code></td><td>Création d'un point</td></tr>
+            <tr><td><code>GET</code></td><td><code>/api/points/&lt;id&gt;/</code></td><td>Consultation d'un point</td></tr>
+            <tr><td><code>DELETE</code></td><td><code>/api/points/&lt;id&gt;/</code></td><td>Suppression d'un point</td></tr>
+            <tr><td><code>GET</code></td><td><code>/api/tracks/</code></td><td>Points regroupés par relevé, au format GeoJSON</td></tr>
+          </tbody>
+        </table></div>
+
+        <h3>Flux</h3>
+        <div class="diagram">
+          <div class="diagram-box">
+            <strong>Navigateur</strong>
+            application cliente (Utilisateur)
+          </div>
+          <div class="diagram-col">
+            <div class="diagram-arrow">HTTPS 443 (tuiles)</div>
+            <div class="diagram-arrow">HTTP 8000</div>
+            <div class="diagram-arrow">HTTP 5000 (JSON)</div>
+          </div>
+          <div class="diagram-col">
+            <div class="diagram-box external">Tuiles OpenStreetMap</div>
+            <div class="diagram-box">Serveur de fichiers statiques</div>
+            <div class="diagram-box">Serveur d'application + API</div>
+          </div>
+          <div class="diagram-col">
+            <div class="diagram-arrow">MySQL 3306</div>
+          </div>
+          <div class="diagram-col">
+            <div class="diagram-box storage">Base de données</div>
+          </div>
+          <div class="diagram-col">
+            <div class="diagram-arrow">stockage</div>
+          </div>
+          <div class="diagram-col">
+            <div class="diagram-box storage">Stockage persistant</div>
+          </div>
+        </div>
+        <p class="part-intro">
+          L'exploitant agit sur tous les composants côté serveur (déploiement, paramètres,
+          sauvegarde) ; il n'a pas de flux applicatif propre.
+        </p>
+
+        <h3>Workflows</h3>
+        <div class="card-grid">
+          <div class="card">
+            <strong>Affichage de la carte et des points</strong>
+            <ol class="workflow">
+              <li>Le navigateur demande <code>/</code> au serveur de fichiers statiques, puis les scripts et feuilles de style.</li>
+              <li>Il demande <code>config.json</code> et y lit l'adresse de l'API.</li>
+              <li>Il demande les tuiles au fournisseur de cartes.</li>
+              <li>Il envoie <code>GET /api/tracks/</code> à l'API, qui lit les points en base et renvoie un GeoJSON.</li>
+              <li>L'application cliente affiche les points sur la carte.</li>
+            </ol>
+          </div>
+          <div class="card">
+            <strong>Saisie d'un point</strong>
+            <ol class="workflow">
+              <li>L'utilisateur remplit le formulaire.</li>
+              <li>Le navigateur envoie <code>POST /api/points/</code> à l'API.</li>
+              <li>L'API valide les données, puis les enregistre en base (erreurs par champ sinon).</li>
+              <li>Le navigateur relance <code>GET /api/tracks/</code> pour rafraîchir la carte.</li>
+            </ol>
+            <p style="margin-top:0.5rem; font-size:0.85rem; color:var(--color-text-muted)">
+              La suppression suit le même principe (<code>DELETE</code>) : l'URL du point
+              est <strong>construite par l'API</strong>, et c'est le navigateur qui
+              l'appelle — l'API doit donc connaître l'adresse sous laquelle le navigateur
+              la joint.
+            </p>
+          </div>
+        </div>
+
+        <h3>Ce qui change par rapport au mode "développement"</h3>
+        <div class="table-scroll"><table>
+          <thead><tr><th>Mode développement</th><th>Mode production</th><th>Pourquoi</th></tr></thead>
+          <tbody>
+            <tr><td>Base embarquée dans le composant API</td><td>Base de données séparée, avec stockage persistant</td><td>Les données ne doivent pas dépendre du cycle de vie de l'API</td></tr>
+            <tr><td>Serveur de développement, une requête à la fois</td><td>Serveur d'application, requêtes en parallèle</td><td>Plusieurs utilisateurs simultanés</td></tr>
+            <tr><td>Serveur statique minimal</td><td>Serveur WEB dédié</td><td>Performance, gestion des en-têtes de cache</td></tr>
+            <tr><td>Démarrage des composants dans n'importe quel ordre</td><td>L'API attend que la base soit prête</td><td>La base doit accepter les connexions avant la migration</td></tr>
+          </tbody>
+        </table></div>
+      </section>
+
+      <!-- ================= PARTIE 3 ================= -->
+      <section class="part" id="partie3">
+        <h2>Partie 3 — Identification des services et de leurs caractéristiques</h2>
+        <p class="part-intro">Trois services à déployer : <code>db</code>, <code>api</code> et <code>frontend</code>.</p>
+
+        <button class="accordion-toggle" :class="{ open: isOpen('p3-db') }" @click="togglePanel('p3-db')">
+          Service <code>db</code> <span class="chevron">▸</span>
+        </button>
+        <div class="accordion-body" x-show="isOpen('p3-db')">
+          <div class="table-scroll"><table>
+            <tbody>
+              <tr><th>Environnement</th><td>Serveur MariaDB</td></tr>
+              <tr><th>Dépendances</th><td>Aucune à ajouter : image officielle utilisée telle quelle</td></tr>
+              <tr><th>Configuration</th><td><code>MARIADB_DATABASE</code>, <code>MARIADB_USER</code>, <code>MARIADB_PASSWORD</code>, <code>MARIADB_RANDOM_ROOT_PASSWORD</code></td></tr>
+              <tr><th>Lancement</th><td>Celui de l'image (<code>mariadbd</code>)</td></tr>
+              <tr><th>Initialisation</th><td>Création de la base et de l'utilisateur par l'image, <strong>uniquement si le volume est vide</strong> : rejouable sans effet sur des données existantes</td></tr>
+              <tr><th>Persistance</th><td><code>/var/lib/mysql</code>, dans un volume nommé</td></tr>
+              <tr><th>Accès</th><td>Depuis la stack uniquement, port 3306, <strong>non publié</strong></td></tr>
+              <tr><th>Logs</th><td>Sortie standard du conteneur (<code>docker compose logs db</code>)</td></tr>
+              <tr><th>Utilisateur</th><td><code>mysql</code> : l'entrypoint démarre en <code>root</code> pour préparer le volume, puis bascule</td></tr>
+              <tr><th>Arrêt</th><td><code>SIGTERM</code> : MariaDB vide ses tampons et ferme proprement les tables</td></tr>
+            </tbody>
+          </table></div>
+        </div>
+
+        <button class="accordion-toggle" :class="{ open: isOpen('p3-api') }" @click="togglePanel('p3-api')">
+          Service <code>api</code> <span class="chevron">▸</span>
+        </button>
+        <div class="accordion-body" x-show="isOpen('p3-api')">
+          <div class="table-scroll"><table>
+            <tbody>
+              <tr><th>Environnement</th><td>Python 3.12, Flask, servi par Gunicorn</td></tr>
+              <tr><th>Dépendances de build</th><td><code>gcc</code>, <code>libc6-dev</code>, <code>pkg-config</code>, <code>libmariadb-dev</code> — <code>mysqlclient</code> n'est distribué qu'en sources pour Linux, il doit être compilé</td></tr>
+              <tr><th>Dépendances d'exécution</th><td><code>libmariadb3</code>, paquets de <code>requirements/production.txt</code></td></tr>
+              <tr><th>Configuration</th><td>Image : <code>SETTINGS_FILE=production</code>, <code>FLASK_APP=app</code>, <code>PYTHONUNBUFFERED=1</code>, <code>PYTHONDONTWRITEBYTECODE=1</code>, <code>GUNICORN_CMD_ARGS</code>. Lancement : <code>VAPOR_DBHOST</code>, <code>VAPOR_DBNAME</code>, <code>VAPOR_DBUSER</code>, <code>VAPOR_DBPASS</code></td></tr>
+              <tr><th>Lancement</th><td><code>gunicorn wsgi:app</code></td></tr>
+              <tr><th>Initialisation</th><td><code>flask db upgrade</code> à chaque démarrage, <strong>rejouable</strong> (Alembic compare <code>alembic_version</code> à la dernière migration)</td></tr>
+              <tr><th>Persistance</th><td>Aucune : service sans état</td></tr>
+              <tr><th>Accès</th><td>Port 5000, <strong>publié</strong> (le complément 1 le supprimera)</td></tr>
+              <tr><th>Logs</th><td>Accès et erreurs de Gunicorn sur la sortie standard (<code>--access-logfile=-</code>)</td></tr>
+              <tr><th>Utilisateur</th><td><code>vapormap</code>, utilisateur système créé dans l'image</td></tr>
+              <tr><th>Arrêt</th><td><code>SIGTERM</code> : Gunicorn termine les requêtes en cours, puis arrête ses workers</td></tr>
+            </tbody>
+          </table></div>
+        </div>
+
+        <button class="accordion-toggle" :class="{ open: isOpen('p3-front') }" @click="togglePanel('p3-front')">
+          Service <code>frontend</code> <span class="chevron">▸</span>
+        </button>
+        <div class="accordion-body" x-show="isOpen('p3-front')">
+          <div class="table-scroll"><table>
+            <tbody>
+              <tr><th>Environnement</th><td>Nginx, fichiers statiques</td></tr>
+              <tr><th>Dépendances</th><td>Aucune : <code>envsubst</code> déjà présent dans l'image nginx</td></tr>
+              <tr><th>Configuration</th><td>Image : <code>nginx.conf</code>. Lancement : <code>VAPORMAP_BACKEND_HOST</code>, <code>VAPORMAP_BACKEND_PORT</code></td></tr>
+              <tr><th>Lancement</th><td>Celui de l'image (<code>nginx -g 'daemon off;'</code>)</td></tr>
+              <tr><th>Initialisation</th><td>Génération de <code>config.json</code> à chaque démarrage, rejouable</td></tr>
+              <tr><th>Persistance</th><td>Aucune</td></tr>
+              <tr><th>Accès</th><td>Port 8080 dans le conteneur, <strong>publié</strong> sur 8000</td></tr>
+              <tr><th>Logs</th><td>Sortie standard : <code>access.log</code>/<code>error.log</code> liés à <code>/dev/stdout</code>/<code>/dev/stderr</code></td></tr>
+              <tr><th>Utilisateur</th><td><code>nginx</code> (uid 101), défini par l'image de base</td></tr>
+              <tr><th>Arrêt</th><td><code>SIGQUIT</code> (arrêt gracieux de nginx), défini par <code>STOPSIGNAL</code></td></tr>
+            </tbody>
+          </table></div>
+        </div>
+
+        <h3>Choix du déploiement Linux : ce qui garde du sens dans un conteneur</h3>
+        <div class="table-scroll"><table>
+          <thead><tr><th>Choix hors conteneur</th><th>Dans un conteneur</th><th>Justification</th></tr></thead>
+          <tbody>
+            <tr><td>Environnement virtuel Python</td><td><strong>Abandonné</strong></td><td>Le conteneur ne contient qu'une application : plus rien à isoler, le venv ajouterait une indirection sans bénéfice</td></tr>
+            <tr><td>Utilisateur dédié <code>app-vapormap</code></td><td><strong>Conservé</strong>, en utilisateur système sans shell ni home</td><td><code>root</code> dans le conteneur reste <code>root</code> pour le noyau partagé</td></tr>
+            <tr><td>SystemD (démarrage, relance, logs)</td><td><strong>Abandonné</strong></td><td>Un conteneur exécute un seul processus ; <code>docker compose</code>/<code>restart</code>/stdout prennent le relais</td></tr>
+            <tr><td>Logs dans <code>/var/log/vapormap</code></td><td><strong>Abandonné</strong></td><td>Un fichier dans le conteneur disparaît avec lui ; la sortie standard est collectée par Docker</td></tr>
+            <tr><td>Droits d'accès de Nginx sur <code>/home/app-vapormap</code></td><td><strong>Sans objet</strong></td><td>Frontend et API sont dans des conteneurs séparés</td></tr>
+            <tr><td>Génération des configs par <code>envsubst</code></td><td><strong>Conservé</strong>, au démarrage et non plus une fois pour toutes</td><td>La valeur dépend du déploiement, pas de l'image</td></tr>
+          </tbody>
+        </table></div>
+      </section>
+
+      <!-- ================= PARTIE 4 ================= -->
+      <section class="part" id="partie4">
+        <h2>Partie 4 — Développement des images des services</h2>
+
+        <h3><code>db</code> : image existante</h3>
+        <p>Aucune image n'est développée : <code>mariadb:11.4.13</code> (branche LTS 11.4, version précise) couvre tous les besoins.</p>
+
+        <h3><code>api</code> — Image de base : <code>python:3.12.14-slim-trixie</code></h3>
+        <div class="table-scroll"><table>
+          <tbody>
+            <tr><th>Écart avec l'environnement validé</th><td>Même version de Python. Distribution différente (Debian 13 vs Ubuntu 24.04), mais mêmes familles de paquets</td></tr>
+            <tr><th>Contenu inutile</th><td>Faible : variante <code>slim</code></td></tr>
+            <tr><th>À ajouter</th><td>Compilateur + en-têtes MariaDB pour <code>mysqlclient</code> (build), <code>libmariadb3</code> (exécution)</td></tr>
+            <tr><th>Origine / mise à jour</th><td>Image officielle Docker, reconstruite à chaque correctif Python/Debian</td></tr>
+          </tbody>
+        </table></div>
+        <p class="part-intro">
+          Écartées : <code>ubuntu:24.04</code> (Python "externally managed", pas de suivi correctif) et
+          <code>python:3.12-alpine</code> (musl → pas de roues précompilées, comportement différent).
+        </p>
+
+        <h3>Choix de mise en œuvre — <code>api</code></h3>
+        <ul>
+          <li><strong>Code figé</strong> : <code>ADD https://gitlab.com/vapormap/vapormap-api.git#&lt;commit&gt;</code> — BuildKit clone lui-même, <code>git</code> n'est pas installé, <code>.git</code> non copié. Le commit est un <code>ARG</code>.</li>
+          <li><strong>Découpage en couches</strong> : installation des outils de build, compilation de <code>mysqlclient</code> et suppression dans <strong>un seul <code>RUN</code></strong> — sinon les outils resteraient dans la couche qui les a installés. <code>libmariadb3</code> installé explicitement, sinon <code>apt-get --auto-remove</code> le supprimerait avec <code>libmariadb-dev</code>.</li>
+          <li><strong><code>wheel</code></strong> non installé séparément : pip récent construit dans un environnement isolé qui installe ses propres outils.</li>
+          <li><strong>Pas de venv</strong> (voir Partie 3).</li>
+          <li><strong>Identifiants de la base</strong> : aucun <code>ENV VAPOR_DB*</code> dans l'image — sans variables au lancement, l'API tenterait <code>localhost</code> (le conteneur lui-même) et échouerait.</li>
+          <li><strong>Gunicorn</strong> configuré par <code>GUNICORN_CMD_ARGS</code> : workers/port changeables au lancement. <code>--worker-tmp-dir=/dev/shm</code> place le heartbeat en mémoire.</li>
+          <li><strong>Initialisation</strong> : <code>entrypoint.sh</code> lance <code>flask db upgrade</code> puis <code>exec "$@"</code> (Gunicorn devient PID 1, reçoit directement <code>SIGTERM</code>). <code>set -e</code> arrête le conteneur si la migration échoue.</li>
+          <li><strong>Utilisateur</strong> <code>vapormap</code> : code propriété de <code>root</code>, lu (pas modifié) par l'utilisateur d'exécution — fonctionne grâce à <code>PYTHONDONTWRITEBYTECODE=1</code>.</li>
+          <li><strong>Documentation</strong> : <code>LABEL org.opencontainers.image.authors</code>, <code>EXPOSE 5000</code> (métadonnée, ne publie rien — c'est <code>ports:</code> dans compose qui publie).</li>
+        </ul>
+
+        <h3><code>frontend</code> — Image de base : <code>nginxinc/nginx-unprivileged:1.30.5-alpine3.24</code></h3>
+        <div class="table-scroll"><table>
+          <tbody>
+            <tr><th>Écart avec l'environnement validé</th><td>Sans objet : fichiers statiques, indépendants de la distribution</td></tr>
+            <tr><th>Contenu inutile</th><td>Très faible : Alpine + nginx</td></tr>
+            <tr><th>À ajouter</th><td>Fichiers du frontend, script de génération de <code>config.json</code> (<code>envsubst</code> déjà présent)</td></tr>
+            <tr><th>Origine / mise à jour</th><td>Maintenue par NGINX (F5), branche stable 1.30</td></tr>
+            <tr><th>Utilisateur</th><td>Tourne <strong>déjà</strong> en non-root (uid 101), droits déjà en place</td></tr>
+          </tbody>
+        </table></div>
+
+        <h3>Choix de mise en œuvre — <code>frontend</code></h3>
+        <ul>
+          <li><strong>Configuration nginx écrite dans le dépôt</strong> (pas de template) : port, <code>server_name</code> et racine sont propres à l'image, pas au déploiement.</li>
+          <li><strong><code>config.json</code> généré au démarrage</strong> : l'adresse de l'API dépend du poste utilisateur, elle ne peut pas être figée au build. Script placé dans <code>/docker-entrypoint.d/</code>, exécuté avant nginx — nginx reste PID 1.</li>
+          <li><strong>Droits</strong> : seul <code>config.json</code> appartient à l'utilisateur 101 (seul fichier réécrit au démarrage).</li>
+          <li><strong><code>Cache-Control: no-store</code></strong> sur <code>config.json</code> : évite qu'un navigateur garde l'ancienne adresse de l'API.</li>
+        </ul>
+
+        <h3>Build &amp; tests unitaires</h3>
+        <p class="part-intro">Commandes de référence (sorties réelles à consigner séparément dans le compte-rendu — <code>À COMPLÉTER</code> dans le README source) :</p>
+        <pre><code>docker build -t vapormap-api:1.0 ./api
+docker image ls vapormap-api
+docker image inspect vapormap-api:1.0 \
+  --format '{{.Config.User}} {{.Config.ExposedPorts}} {{json .Config.Labels}}'</code></pre>
+        <pre><code>docker build -t vapormap-front:1.0 ./frontend
+docker run -d --name test-front -p 8000:8080 \
+  -e VAPORMAP_BACKEND_HOST=monhote.example -e VAPORMAP_BACKEND_PORT=5999 \
+  vapormap-front:1.0</code></pre>
+      </section>
+
+      <!-- ================= PARTIE 5 ================= -->
+      <section class="part" id="partie5">
+        <h2>Partie 5 — Développement de la stack de l'application</h2>
+        <p class="part-intro">Voir <code>docker-compose.yml</code> et <code>.env.example</code>.</p>
+
+        <h3>Mise à disposition des images</h3>
+        <p>
+          Images <strong>construites localement</strong> par <code>docker compose build</code>,
+          aucun registre disponible pour ce lab — le dépôt contient les Dockerfiles, le code
+          est figé par commit : deux builds donnent le même résultat. En production réelle :
+          build une fois, push dans un registre, le serveur ne ferait que <code>pull</code>.
+        </p>
+
+        <h3>Choix de mise en œuvre</h3>
+        <ul>
+          <li><strong>Non redéclaré</strong> : réseau (compose en crée un par défaut), commandes de lancement, utilisateurs, ports internes, signaux d'arrêt — déjà définis dans les images.</li>
+          <li><strong>Deux adresses de l'API</strong> : <code>VAPOR_DBHOST: db</code> (interne, DNS Docker, pour le conteneur API) vs <code>VAPORMAP_BACKEND_HOST: ${VAPORMAP_PUBLIC_HOST}</code> (publique, pour le navigateur — <code>api</code> n'aurait ici aucun sens).</li>
+          <li><strong>Paramètres</strong> dans <code>.env</code> (non versionné), <code>.env.example</code> comme modèle.</li>
+          <li><strong>Ports publiés</strong> : <code>frontend</code> (8000) et <code>api</code> (5000) seulement — pas <code>db</code>.</li>
+          <li><strong>Volume</strong> <code>db-data</code>, monté sur <code>/var/lib/mysql</code>, survit à <code>down</code> mais pas à <code>down --volumes</code>.</li>
+        </ul>
+
+        <h3>Démarrage fiable</h3>
+        <p>
+          <code>depends_on</code> seul n'attend que le <strong>démarrage du conteneur</strong>
+          de la base, pas qu'elle accepte des connexions — la migration de l'API échouait au
+          premier lancement. Solution : <code>healthcheck</code> sur <code>db</code>
+          (<code>--connect</code> + <code>--innodb_initialized</code>), API conditionnée par
+          <code>condition: service_healthy</code>.
+        </p>
+        <div class="table-scroll"><table>
+          <thead><tr><th>Réglage</th><th>Valeur</th><th>Effet</th></tr></thead>
+          <tbody>
+            <tr><td><code>interval</code></td><td>5s</td><td>L'API démarre au plus 5 s après que la base est prête</td></tr>
+            <tr><td><code>timeout</code></td><td>3s</td><td>Une connexion locale &gt; 3 s signale un problème</td></tr>
+            <tr><td><code>start_period</code></td><td>30s</td><td>Les échecs pendant l'initialisation d'un volume vide ne sont pas comptés</td></tr>
+            <tr><td><code>retries</code></td><td>5</td><td>25 s d'échecs consécutifs après <code>start_period</code> avant "unhealthy"</td></tr>
+          </tbody>
+        </table></div>
+        <p class="part-intro">
+          Limites : la vérification n'a lieu <strong>qu'au démarrage</strong> — si la base
+          tombe ensuite, l'API n'est pas relancée (<code>pool_pre_ping</code> aide à
+          reprendre la connexion). Si la base reste <em>unhealthy</em>,
+          <code>docker compose up</code> échoue plutôt que d'attendre indéfiniment.
+        </p>
+
+        <h3>Procédure</h3>
+        <pre><code>cp .env.example .env     # puis modifier VAPOR_DBPASS
+docker compose build
+docker compose up -d
+docker compose ps</code></pre>
+      </section>
+
+      <!-- ================= PARTIE 6 ================= -->
+      <section class="part" id="partie6">
+        <h2>Partie 6 — Validation du bon fonctionnement de l'application</h2>
+
+        <button class="accordion-toggle" :class="{ open: isOpen('p6-acces') }" @click="togglePanel('p6-acces')">
+          Accès à l'application <span class="chevron">▸</span>
+        </button>
+        <div class="accordion-body" x-show="isOpen('p6-acces')">
+          <p>Ouvrir <code>http://localhost:8000</code>, créer deux points. Dans l'onglet Réseau, vérifier que les requêtes vers <code>http://localhost:5000/api/tracks/</code> et <code>/api/points/</code> partent <strong>du navigateur</strong>, avec un statut 200 ou 201.</p>
+        </div>
+
+        <button class="accordion-toggle" :class="{ open: isOpen('p6-isolation') }" @click="togglePanel('p6-isolation')">
+          Isolation des services <span class="chevron">▸</span>
+        </button>
+        <div class="accordion-body" x-show="isOpen('p6-isolation')">
+          <pre><code>docker compose ps --format 'table {{.Service}}\t{{.Ports}}'
+
+# db n'est pas joignable depuis l'hôte
+nc -zv localhost 3306
+# db est joignable depuis la stack
+docker compose exec api python -c "import socket; socket.create_connection(('db', 3306), 2); print('db OK')"</code></pre>
+          <p class="part-intro">Attendu : ports publiés pour <code>frontend</code> et <code>api</code> uniquement.</p>
+        </div>
+
+        <button class="accordion-toggle" :class="{ open: isOpen('p6-user') }" @click="togglePanel('p6-user')">
+          Utilisateur d'exécution des services <span class="chevron">▸</span>
+        </button>
+        <div class="accordion-body" x-show="isOpen('p6-user')">
+          <pre><code>docker compose top</code></pre>
+          <p class="part-intro">Attendu : <code>vapormap</code> (Gunicorn), <code>101</code> (workers/master nginx), <code>mysql</code> uid 999 (MariaDB).</p>
+        </div>
+
+        <button class="accordion-toggle" :class="{ open: isOpen('p6-storage') }" @click="togglePanel('p6-storage')">
+          Stockage et persistance des données <span class="chevron">▸</span>
+        </button>
+        <div class="accordion-body" x-show="isOpen('p6-storage')">
+          <pre><code>docker compose exec db mariadb -u user_vapormap -p db_vapormap -e 'SELECT * FROM point;'
+docker compose exec api find / -name '*.db' -o -name '*.sqlite*' 2>/dev/null
+
+docker compose down
+docker compose up -d
+docker compose exec db mariadb -u user_vapormap -p db_vapormap -e 'SELECT * FROM point;'</code></pre>
+        </div>
+
+        <button class="accordion-toggle" :class="{ open: isOpen('p6-logs') }" @click="togglePanel('p6-logs')">
+          Logs <span class="chevron">▸</span>
+        </button>
+        <div class="accordion-body" x-show="isOpen('p6-logs')">
+          <pre><code>docker compose logs frontend
+docker compose logs api
+docker compose logs db
+# aucun fichier de log écrit dans les conteneurs
+docker compose exec frontend ls -l /var/log/nginx/</code></pre>
+        </div>
+
+        <button class="accordion-toggle" :class="{ open: isOpen('p6-startstop') }" @click="togglePanel('p6-startstop')">
+          Démarrage et arrêt de la stack <span class="chevron">▸</span>
+        </button>
+        <div class="accordion-body" x-show="isOpen('p6-startstop')">
+          <pre><code>docker compose down --volumes
+docker compose up -d
+docker compose ps       # tous "running", db "healthy"
+
+time docker compose stop frontend
+time docker compose stop api
+time docker compose stop db
+docker compose logs --tail 5 frontend api db</code></pre>
+          <p class="part-intro">
+            Attendu : arrêt en moins d'une seconde pour les trois services — le processus qui
+            reçoit le signal est le serveur lui-même (nginx, Gunicorn grâce à <code>exec</code>,
+            MariaDB). Un arrêt proche de 10 s indiquerait un conteneur tué à l'expiration du
+            délai de grâce.
+          </p>
+        </div>
+      </section>
+
+      <!-- ================= COMPLÉMENTS ================= -->
+      <section class="part" id="complements">
+        <h2>Compléments traités</h2>
+        <p class="disclaimer">
+          À COMPLÉTER dans le README source. Un complément cité sans mise en œuvre ne
+          compte pas. Aucun n'est traité à ce stade ; ce qui en est anticipé, sans être
+          complet :
+        </p>
+        <ul>
+          <li><strong>Complément 3</strong> : healthcheck sur <code>db</code> seulement, pas sur les autres services.</li>
+          <li><strong>Complément 5</strong> : paramètres dans <code>.env</code>, mais pas de <code>secrets</code>, ni d'analyse de l'exposition des valeurs.</li>
+          <li><strong>Complément 8</strong> : <code>exec</code> dans l'entrypoint de l'API, pas encore mesuré.</li>
+        </ul>
+      </section>
+
+      <footer class="page-footer">
+        Généré à partir de <code>README.md</code> · styles et script dans
+        <code>docs/visualisation/</code> (gabarit dérivé de
+        <code>template-monitoring-viewpage</code>) ·
+        <a href="docs/intro.html">contexte : du lab Linux au lab Docker</a>.
+      </footer>
+
+    </main>
+  </div>
+</body>
+</html>

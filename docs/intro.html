@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VaporMap — Du prod Linux au prod Docker</title>
+  <link rel="stylesheet" href="visualisation/css/style.css" />
+  <script defer src="visualisation/js/alpine.min.js"></script>
+  <script defer src="visualisation/js/app.js"></script>
+</head>
+<body>
+  <div class="layout" x-data="readme">
+
+    <aside class="sidebar">
+      <h2>Sommaire</h2>
+      <nav>
+        <a href="#contexte" :class="{ active: isActive('contexte') }">Le lab de l'an dernier</a>
+        <a href="#acquis" :class="{ active: isActive('acquis') }">Ce qui reste valable</a>
+        <a href="#ecarts" :class="{ active: isActive('ecarts') }">Les deux manques identifiés</a>
+        <a href="#transposition" :class="{ active: isActive('transposition') }">Linux natif → Docker</a>
+        <a href="#suite" :class="{ active: isActive('suite') }">Suite : le prod Docker</a>
+      </nav>
+    </aside>
+
+    <main class="content">
+
+      <header class="page-header" id="contexte">
+        <h1>De VaporMap "prod Linux" à VaporMap "prod Docker"</h1>
+        <p>Page d'introduction — resitue le lab de l'an dernier avant de passer au compte-rendu Docker.</p>
+        <div class="disclaimer">
+          Cette page ne redécrit pas le déploiement Docker en détail — c'est le rôle de
+          <a href="../index.html">index.html</a>. Elle sert de <strong>pont</strong> :
+          qu'avions-nous déjà construit, qu'est-ce qui change, et pourquoi repartir de
+          cette base plutôt que de tout refaire.
+        </div>
+      </header>
+
+      <section class="part">
+        <h2>Le lab de l'an dernier, avec M. Braux</h2>
+        <p>
+          Le <a href="page_dev.md">lab "prod Linux"</a> (Emmanuel Braux, cursus
+          Administration Système) demandait de déployer VaporMap en production sur une
+          VM Debian, <strong>sans conteneurs</strong> : installation manuelle des
+          paquets, création d'un utilisateur système dédié, base MariaDB locale, API
+          servie par Gunicorn, frontend par Nginx, le tout orchestré par
+          <code>systemd</code>. Le <a href="README.md">compte-rendu</a> de ce lab a été
+          noté <strong>14/20</strong> (voir <a href="weakness.md">l'analyse détaillée</a>).
+        </p>
+        <p>
+          Deux parties du sujet n'avaient pas été traitées à l'époque :
+        </p>
+        <ul>
+          <li><strong>Partie 8</strong> — activation des logs Gunicorn (<code>--access-logfile</code> / <code>--error-logfile</code>) vers <code>/var/log/vapormap</code>.</li>
+          <li><strong>Partie 9</strong> — point d'accès unique : faire passer l'API derrière Nginx (<code>location /api/</code> en reverse proxy) au lieu d'exposer le port 5000 directement.</li>
+        </ul>
+      </section>
+
+      <section class="part" id="acquis">
+        <h2>Ce qui reste valable</h2>
+        <p class="part-intro">
+          Le passage à Docker ne remet pas en cause l'architecture validée l'an dernier —
+          il change la façon de la <strong>mettre en œuvre</strong>. Les mêmes briques
+          sont réutilisées telles quelles :
+        </p>
+        <div class="card-grid">
+          <div class="card"><strong>Nginx devant les fichiers statiques</strong>Même rôle : servir le frontend, gérer le cache. Seule la manière d'écrire <code>config.json</code> change (généré au démarrage du conteneur plutôt qu'à l'installation).</div>
+          <div class="card"><strong>Gunicorn multi-workers</strong>Même commande de lancement (<code>gunicorn wsgi:app</code>), même rôle de serveur WSGI de production face au serveur intégré de Flask.</div>
+          <div class="card"><strong>MariaDB séparée de l'API</strong>Déjà le cas l'an dernier (base locale sur la VM, mais processus distinct). Le conteneur ne fait que rendre cette séparation plus stricte, avec un stockage explicitement externalisé (volume nommé).</div>
+          <div class="card"><strong>Utilisateur non privilégié</strong><code>app-vapormap</code> côté Linux devient l'utilisateur d'exécution défini dans le Dockerfile — même principe : le processus applicatif ne doit pas pouvoir modifier son propre code ni agir en <code>root</code>.</div>
+          <div class="card"><strong>Migrations idempotentes</strong><code>flask db upgrade</code> était déjà rejouable l'an dernier ; c'est cette propriété qui permet aujourd'hui de l'exécuter automatiquement à chaque démarrage du conteneur, sans intervention manuelle.</div>
+        </div>
+      </section>
+
+      <section class="part" id="ecarts">
+        <h2>Les deux manques identifiés : où en est-on cette fois</h2>
+        <p class="part-intro">
+          Utile à savoir avant de lire le compte-rendu Docker : ces deux points n'étaient
+          pas de simples oublis isolés, ce sont des sujets qui se posent différemment une
+          fois en conteneur.
+        </p>
+        <div class="table-scroll">
+        <table>
+          <thead><tr><th>Manque (lab Linux)</th><th>Statut dans le lab Docker</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>Logs Gunicorn non redirigés vers des fichiers dédiés</td>
+              <td><span class="badge badge--oui">Traité</span> — mais différemment : en conteneur, on n'écrit <em>pas</em> de fichier de log (il disparaîtrait avec le conteneur). Les logs vont sur la sortie standard, collectée par <code>docker compose logs</code>. Le besoin d'origine (pouvoir consulter les logs) est couvert par un mécanisme plus adapté au contexte, pas par la solution initialement prévue.</td>
+            </tr>
+            <tr>
+              <td>Pas de point d'accès unique (API exposée directement sur le port 5000)</td>
+              <td><span class="badge badge--non">Toujours ouvert</span> — le port de l'API reste publié tel quel dans <code>docker-compose.yml</code>. C'est explicitement noté hors périmètre du lab Docker actuel (voir les "Compléments" du <a href="../index.html#complements">compte-rendu</a>) : le reverse proxy Nginx → API n'est pas encore mis en place.</td>
+            </tr>
+          </tbody>
+        </table>
+        </div>
+      </section>
+
+      <section class="part" id="transposition">
+        <h2>Linux natif → Docker : ce qui change concrètement</h2>
+        <p class="part-intro">
+          Reprise, du point de vue de cette transition, du tableau détaillé du
+          <a href="../index.html#partie3">compte-rendu Docker</a> :
+        </p>
+        <div class="table-scroll">
+        <table>
+          <thead><tr><th>Sur la VM Debian (l'an dernier)</th><th>En conteneur (cette année)</th></tr></thead>
+          <tbody>
+            <tr><td><code>apt install mariadb-server</code>, configuré à la main</td><td>Image officielle <code>mariadb:11.4.13</code>, configurée par variables d'environnement</td></tr>
+            <tr><td><code>systemctl enable</code> pour le redémarrage au boot</td><td>Politique <code>restart</code> de Docker Compose (pas encore mise en œuvre — complément 6)</td></tr>
+            <tr><td>Utilisateur système <code>app-vapormap</code> créé à la main (<code>useradd</code>)</td><td>Utilisateur défini dans le Dockerfile, recréé identiquement à chaque build</td></tr>
+            <tr><td><code>envsubst</code> exécuté une fois, à l'installation</td><td><code>envsubst</code> exécuté à chaque démarrage du conteneur (l'image ne connaît pas encore le déploiement final)</td></tr>
+            <tr><td>Logs dans <code>/var/log/vapormap</code> (fichiers)</td><td>Sortie standard du conteneur, collectée par Docker</td></tr>
+            <tr><td>Build manuel, dépendances installées une fois sur la VM</td><td>Build reproductible (<code>docker compose build</code>), rejouable à l'identique</td></tr>
+            <tr><td>Deux dépôts clonés (API, frontend) à la branche courante</td><td>Code figé à un commit précis au moment du build de l'image</td></tr>
+          </tbody>
+        </table>
+        </div>
+      </section>
+
+      <section class="part" id="suite">
+        <h2>La suite : le compte-rendu "prod Docker"</h2>
+        <p>
+          La description complète de l'architecture, des services, des images et de la
+          validation du déploiement conteneurisé est dans
+          <strong><a href="../index.html">index.html</a></strong>. Sources de cette
+          page : <a href="README.md">compte-rendu du lab Linux</a>,
+          <a href="page_dev.md">énoncé du lab Linux</a>,
+          <a href="weakness.md">analyse de notation</a>.
+        </p>
+      </section>
+
+      <footer class="page-footer">
+        Styles et script partagés avec <code>index.html</code>, depuis
+        <code>docs/visualisation/</code>.
+      </footer>
+
+    </main>
+  </div>
+</body>
+</html>
